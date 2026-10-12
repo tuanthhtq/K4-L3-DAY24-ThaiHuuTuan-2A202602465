@@ -34,7 +34,13 @@ không phải xác thực người dùng production.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+PRINCIPALS_PATH = Path(__file__).resolve().parent.parent / "data" / "principals.json"
 
 
 @dataclass(frozen=True)
@@ -52,4 +58,28 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "restricted data cannot use egress"
+
+    principals = json.loads(PRINCIPALS_PATH.read_text(encoding="utf-8"))
+    principal = principals.get(context.principal_id)
+    if principal is None:
+        return False, "unknown principal"
+    if context.request_purpose not in principal.get("purposes", ()):
+        return False, "purpose is not allowed for principal"
+    if context.requested_tool not in principal.get("allowed_tools", ()):
+        return False, "tool is not allowed for principal"
+    if context.requested_tool not in context.agent_scopes:
+        return False, "tool is outside agent scope"
+    if context.delegation_depth > 0 and context.requested_tool not in context.parent_scopes:
+        return False, "tool is outside parent scope"
+
+    try:
+        expires_at = datetime.fromisoformat(context.expires_at.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return False, "invalid expiry"
+    if expires_at.tzinfo is None:
+        return False, "expiry must include timezone"
+    if expires_at <= datetime.now(timezone.utc):
+        return False, "authorization expired"
+    return True, "principal, purpose, scope and expiry are valid"
